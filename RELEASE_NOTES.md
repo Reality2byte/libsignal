@@ -1,5 +1,3 @@
-v0.73.3
+v0.74.1
 
-- keytrans: Properly bridge and document errors
-
-- keytrans: Add production configuration
+-   backups: Add integrityCheck to LocatorInfo
