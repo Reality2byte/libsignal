@@ -39,6 +39,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
+spqr = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -58,6 +59,7 @@ criterion = { workspace = true }
 env_logger = { workspace = true }
 futures-util = { workspace = true }
 proptest = { workspace = true }
+rand_chacha = { workspace = true }
 rand_core = { workspace = true }
 
 [build-dependencies]

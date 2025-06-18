@@ -1,5 +1,4 @@
-v0.73.3
+v0.75.1
 
-- keytrans: Properly bridge and document errors
-
-- keytrans: Add production configuration
+- backups: Update validation to reject EncryptedDigest with no transit info
+- backups: Validate new backupTier field

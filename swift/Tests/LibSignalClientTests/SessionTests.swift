@@ -26,7 +26,7 @@ class SessionTests: TestCaseBase {
             initSessions(alice_store, bob_store, bob_address)
 
             // Alice sends a message:
-            let ptext_a: [UInt8] = [8, 6, 7, 5, 3, 0, 9]
+            let ptext_a = Data([8, 6, 7, 5, 3, 0, 9])
 
             let ctext_a = try! signalEncrypt(
                 message: ptext_a,
@@ -48,13 +48,14 @@ class SessionTests: TestCaseBase {
                 preKeyStore: bob_store,
                 signedPreKeyStore: bob_store,
                 kyberPreKeyStore: bob_store,
-                context: NullContext()
+                context: NullContext(),
+                usePqRatchet: true
             )
 
             XCTAssertEqual(ptext_a, ptext_b)
 
             // Bob replies
-            let ptext2_b: [UInt8] = [23]
+            let ptext2_b = Data([23])
 
             let ctext2_b = try! signalEncrypt(
                 message: ptext2_b,
@@ -116,7 +117,8 @@ class SessionTests: TestCaseBase {
                     preKeyStore: bob_store,
                     signedPreKeyStore: bob_store,
                     kyberPreKeyStore: bob_store,
-                    context: NullContext()
+                    context: NullContext(),
+                    usePqRatchet: true
                 ),
                 "should fail to decrypt"
             ) { error in
@@ -171,7 +173,8 @@ class SessionTests: TestCaseBase {
             sessionStore: alice_store,
             identityStore: alice_store,
             now: Date(timeIntervalSinceReferenceDate: 0),
-            context: NullContext()
+            context: NullContext(),
+            usePqRatchet: true
         )
 
         let initial_session = try! alice_store.loadSession(for: bob_address, context: NullContext())!
@@ -231,7 +234,7 @@ class SessionTests: TestCaseBase {
             signerKey: server_keys.privateKey
         )
 
-        let message = Array("2020 vision".utf8)
+        let message = Data("2020 vision".utf8)
 
         func sealedSenderEncryptPlaintext<Bytes: ContiguousBytes>(
             message: Bytes,
@@ -240,7 +243,7 @@ class SessionTests: TestCaseBase {
             sessionStore: SessionStore,
             identityStore: IdentityKeyStore,
             context: StoreContext
-        ) throws -> [UInt8] {
+        ) throws -> Data {
             let ciphertextMessage = try signalEncrypt(
                 message: message,
                 for: address,
@@ -282,7 +285,8 @@ class SessionTests: TestCaseBase {
             preKeyStore: bob_store,
             signedPreKeyStore: bob_store,
             kyberPreKeyStore: bob_store,
-            context: NullContext()
+            context: NullContext(),
+            usePqRatchet: true
         )
 
         XCTAssertEqual(plaintext, message)
@@ -448,7 +452,7 @@ class SessionTests: TestCaseBase {
             context: NullContext()
         )
 
-        XCTAssertEqual(b_ptext, [1, 2, 3])
+        XCTAssertEqual(b_ptext, Data([1, 2, 3]))
 
         let another_skdm = try! SenderKeyDistributionMessage(
             from: alice_address,
@@ -618,7 +622,8 @@ class SessionTests: TestCaseBase {
             preKeyStore: alice_store,
             signedPreKeyStore: alice_store,
             kyberPreKeyStore: alice_store,
-            context: NullContext()
+            context: NullContext(),
+            usePqRatchet: true
         )
 
         let bob_message = try signalEncrypt(
@@ -729,7 +734,8 @@ private func initializeSessionsV4(
         for: bob_address,
         sessionStore: alice_store,
         identityStore: alice_store,
-        context: NullContext()
+        context: NullContext(),
+        usePqRatchet: true
     )
 
     XCTAssertEqual(try! alice_store.loadSession(for: bob_address, context: NullContext())?.hasCurrentState, true)

@@ -10,6 +10,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.signal.libsignal.internal.FilterExceptions.filterExceptions;
 import static org.signal.libsignal.protocol.SessionRecordTest.getAliceBaseKey;
 
 import java.time.Instant;
@@ -24,7 +25,6 @@ import org.junit.experimental.runners.Enclosed;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.signal.libsignal.protocol.kem.KEMKeyPair;
 import org.signal.libsignal.protocol.kem.KEMKeyType;
@@ -40,10 +40,10 @@ import org.signal.libsignal.protocol.util.Pair;
 
 @RunWith(Enclosed.class)
 public class SessionBuilderTest {
-  private static final SignalProtocolAddress ALICE_ADDRESS =
-      new SignalProtocolAddress("+14151111111", 1);
-  private static final SignalProtocolAddress BOB_ADDRESS =
-      new SignalProtocolAddress("+14152222222", 1);
+  static final SignalProtocolAddress ALICE_ADDRESS =
+      filterExceptions(() -> new SignalProtocolAddress("+14151111111", 1));
+  static final SignalProtocolAddress BOB_ADDRESS =
+      filterExceptions(() -> new SignalProtocolAddress("+14152222222", 1));
 
   @RunWith(Parameterized.class)
   public static class Versioned {
@@ -60,6 +60,57 @@ public class SessionBuilderTest {
       return Arrays.asList(new Object[][] {{new PQXDHBundleFactory(), 4}});
     }
 
+    Pair<SignalProtocolStore, SignalProtocolStore> initializeSessions() {
+      try {
+        SignalProtocolStore aliceStore = new TestInMemorySignalProtocolStore();
+        SessionBuilder aliceSessionBuilder = new SessionBuilder(aliceStore, BOB_ADDRESS);
+
+        SignalProtocolStore bobStore = new TestInMemorySignalProtocolStore();
+
+        PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
+
+        aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
+
+        assertTrue(aliceStore.containsSession(BOB_ADDRESS));
+        assertTrue(aliceStore.loadSession(BOB_ADDRESS).getSessionVersion() == expectedVersion);
+
+        String originalMessage = "initial hello!";
+        SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
+        CiphertextMessage outgoingMessage = aliceSessionCipher.encrypt(originalMessage.getBytes());
+
+        assertTrue(outgoingMessage.getType() == CiphertextMessage.PREKEY_TYPE);
+
+        PreKeySignalMessage incomingMessage = new PreKeySignalMessage(outgoingMessage.serialize());
+
+        SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
+        byte[] plaintext = bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
+
+        assertTrue(bobStore.containsSession(ALICE_ADDRESS));
+        assertEquals(bobStore.loadSession(ALICE_ADDRESS).getSessionVersion(), expectedVersion);
+        assertNotNull(getAliceBaseKey(bobStore.loadSession(ALICE_ADDRESS)));
+        assertTrue(originalMessage.equals(new String(plaintext)));
+
+        CiphertextMessage bobOutgoingMessage = bobSessionCipher.encrypt(originalMessage.getBytes());
+        assertTrue(bobOutgoingMessage.getType() == CiphertextMessage.WHISPER_TYPE);
+
+        byte[] alicePlaintext =
+            aliceSessionCipher.decrypt(new SignalMessage(bobOutgoingMessage.serialize()));
+        assertTrue(new String(alicePlaintext).equals(originalMessage));
+
+        return new Pair<>(aliceStore, bobStore);
+
+      } catch (DuplicateMessageException
+          | InvalidKeyException
+          | InvalidKeyIdException
+          | InvalidMessageException
+          | InvalidVersionException
+          | LegacyMessageException
+          | NoSessionException
+          | UntrustedIdentityException e) {
+        throw new AssertionError("basic initialization should not encounter any exceptions", e);
+      }
+    }
+
     @Test
     public void testBasicPreKey()
         throws InvalidKeyException,
@@ -70,61 +121,35 @@ public class SessionBuilderTest {
             LegacyMessageException,
             UntrustedIdentityException,
             NoSessionException {
-      SignalProtocolStore aliceStore = new TestInMemorySignalProtocolStore();
-      SessionBuilder aliceSessionBuilder = new SessionBuilder(aliceStore, BOB_ADDRESS);
-
-      final SignalProtocolStore bobStore = new TestInMemorySignalProtocolStore();
-
-      PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
-
-      aliceSessionBuilder.process(bobPreKey);
-
-      assertTrue(aliceStore.containsSession(BOB_ADDRESS));
-      assertTrue(aliceStore.loadSession(BOB_ADDRESS).getSessionVersion() == expectedVersion);
-
-      String originalMessage = "Good, fast, cheap: pick two";
-      SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
-      CiphertextMessage outgoingMessage = aliceSessionCipher.encrypt(originalMessage.getBytes());
-
-      assertTrue(outgoingMessage.getType() == CiphertextMessage.PREKEY_TYPE);
-
-      PreKeySignalMessage incomingMessage = new PreKeySignalMessage(outgoingMessage.serialize());
-
-      SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
-      byte[] plaintext = bobSessionCipher.decrypt(incomingMessage);
-
-      assertTrue(bobStore.containsSession(ALICE_ADDRESS));
-      assertEquals(bobStore.loadSession(ALICE_ADDRESS).getSessionVersion(), expectedVersion);
-      assertNotNull(getAliceBaseKey(bobStore.loadSession(ALICE_ADDRESS)));
-      assertTrue(originalMessage.equals(new String(plaintext)));
-
-      CiphertextMessage bobOutgoingMessage = bobSessionCipher.encrypt(originalMessage.getBytes());
-      assertTrue(bobOutgoingMessage.getType() == CiphertextMessage.WHISPER_TYPE);
-
-      byte[] alicePlaintext =
-          aliceSessionCipher.decrypt(new SignalMessage(bobOutgoingMessage.serialize()));
-      assertTrue(new String(alicePlaintext).equals(originalMessage));
+      var stores = initializeSessions();
+      SignalProtocolStore aliceStore = stores.first();
+      SignalProtocolStore bobStore = stores.second();
 
       runInteraction(aliceStore, bobStore);
 
       aliceStore = new TestInMemorySignalProtocolStore();
-      aliceSessionBuilder = new SessionBuilder(aliceStore, BOB_ADDRESS);
-      aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
+      var aliceSessionBuilder = new SessionBuilder(aliceStore, BOB_ADDRESS);
+      var aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
 
       PreKeyBundle anotherBundle = bundleFactory.createBundle(bobStore);
-      aliceSessionBuilder.process(anotherBundle);
+      aliceSessionBuilder.process(anotherBundle, UsePqRatchet.YES);
 
-      outgoingMessage = aliceSessionCipher.encrypt(originalMessage.getBytes());
+      String originalMessage = "Good, fast, cheap: pick two";
+      var outgoingMessage = aliceSessionCipher.encrypt(originalMessage.getBytes());
 
+      var bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
       try {
-        plaintext = bobSessionCipher.decrypt(new PreKeySignalMessage(outgoingMessage.serialize()));
+        bobSessionCipher.decrypt(
+            new PreKeySignalMessage(outgoingMessage.serialize()), UsePqRatchet.YES);
         fail("shouldn't be trusted!");
       } catch (UntrustedIdentityException uie) {
         bobStore.saveIdentity(
             ALICE_ADDRESS, new PreKeySignalMessage(outgoingMessage.serialize()).getIdentityKey());
       }
 
-      plaintext = bobSessionCipher.decrypt(new PreKeySignalMessage(outgoingMessage.serialize()));
+      var plaintext =
+          bobSessionCipher.decrypt(
+              new PreKeySignalMessage(outgoingMessage.serialize()), UsePqRatchet.YES);
       assertTrue(new String(plaintext).equals(originalMessage));
 
       Random random = new Random();
@@ -133,17 +158,17 @@ public class SessionBuilderTest {
               bobStore.getLocalRegistrationId(),
               1,
               random.nextInt(Medium.MAX_VALUE),
-              Curve.generateKeyPair().getPublicKey(),
+              ECKeyPair.generate().getPublicKey(),
               random.nextInt(Medium.MAX_VALUE),
-              bobPreKey.getSignedPreKey(),
-              bobPreKey.getSignedPreKeySignature(),
+              anotherBundle.getSignedPreKey(),
+              anotherBundle.getSignedPreKeySignature(),
               aliceStore.getIdentityKeyPair().getPublicKey(),
               random.nextInt(Medium.MAX_VALUE),
-              bobPreKey.getKyberPreKey(),
-              bobPreKey.getKyberPreKeySignature());
+              anotherBundle.getKyberPreKey(),
+              anotherBundle.getKyberPreKeySignature());
 
       try {
-        aliceSessionBuilder.process(badIdentityBundle);
+        aliceSessionBuilder.process(badIdentityBundle, UsePqRatchet.YES);
         fail("shoulnd't be trusted!");
       } catch (UntrustedIdentityException uie) {
         // good
@@ -166,7 +191,7 @@ public class SessionBuilderTest {
       SignalProtocolStore bobStore = new TestInMemorySignalProtocolStore();
 
       PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
 
       String originalMessage = "Good, fast, cheap: pick two";
       SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
@@ -180,7 +205,7 @@ public class SessionBuilderTest {
 
       SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
 
-      byte[] plaintext = bobSessionCipher.decrypt(incomingMessage);
+      byte[] plaintext = bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
       assertTrue(originalMessage.equals(new String(plaintext)));
 
       CiphertextMessage bobOutgoingMessage = bobSessionCipher.encrypt(originalMessage.getBytes());
@@ -194,7 +219,9 @@ public class SessionBuilderTest {
       PreKeySignalMessage incomingMessageTwo =
           new PreKeySignalMessage(outgoingMessageTwo.serialize());
 
-      plaintext = bobSessionCipher.decrypt(new PreKeySignalMessage(incomingMessageTwo.serialize()));
+      plaintext =
+          bobSessionCipher.decrypt(
+              new PreKeySignalMessage(incomingMessageTwo.serialize()), UsePqRatchet.YES);
       assertTrue(originalMessage.equals(new String(plaintext)));
 
       bobOutgoingMessage = bobSessionCipher.encrypt(originalMessage.getBytes());
@@ -226,7 +253,7 @@ public class SessionBuilderTest {
               bobPreKey.getKyberPreKey(),
               bobPreKey.getKyberPreKeySignature());
 
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
 
       assertTrue(aliceStore.containsSession(BOB_ADDRESS));
       assertTrue(aliceStore.loadSession(BOB_ADDRESS).getSessionVersion() == expectedVersion);
@@ -241,7 +268,7 @@ public class SessionBuilderTest {
       assertTrue(!incomingMessage.getPreKeyId().isPresent());
 
       SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
-      byte[] plaintext = bobSessionCipher.decrypt(incomingMessage);
+      byte[] plaintext = bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
 
       assertTrue(bobStore.containsSession(ALICE_ADDRESS));
       assertEquals(bobStore.loadSession(ALICE_ADDRESS).getSessionVersion(), expectedVersion);
@@ -266,7 +293,7 @@ public class SessionBuilderTest {
 
       PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
 
-      aliceSessionBuilder.process(bobPreKey, Instant.EPOCH);
+      aliceSessionBuilder.process(bobPreKey, Instant.EPOCH, UsePqRatchet.YES);
 
       SessionRecord initialSession = aliceStore.loadSession(BOB_ADDRESS);
       assertTrue(initialSession.hasSenderChain(Instant.EPOCH));
@@ -303,18 +330,20 @@ public class SessionBuilderTest {
 
       IdentityKeyStore bobIdentityKeyStore = new TestInMemoryIdentityKeyStore();
 
-      ECKeyPair bobPreKeyPair = Curve.generateKeyPair();
-      ECKeyPair bobSignedPreKeyPair = Curve.generateKeyPair();
+      ECKeyPair bobPreKeyPair = ECKeyPair.generate();
+      ECKeyPair bobSignedPreKeyPair = ECKeyPair.generate();
       byte[] bobSignedPreKeySignature =
-          Curve.calculateSignature(
-              bobIdentityKeyStore.getIdentityKeyPair().getPrivateKey(),
-              bobSignedPreKeyPair.getPublicKey().serialize());
+          bobIdentityKeyStore
+              .getIdentityKeyPair()
+              .getPrivateKey()
+              .calculateSignature(bobSignedPreKeyPair.getPublicKey().serialize());
 
       KEMKeyPair bobKyberPreKeyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024);
       byte[] bobKyberPreKeySignature =
-          Curve.calculateSignature(
-              bobIdentityKeyStore.getIdentityKeyPair().getPrivateKey(),
-              bobKyberPreKeyPair.getPublicKey().serialize());
+          bobIdentityKeyStore
+              .getIdentityKeyPair()
+              .getPrivateKey()
+              .calculateSignature(bobKyberPreKeyPair.getPublicKey().serialize());
 
       for (int i = 0; i < bobSignedPreKeySignature.length * 8; i++) {
         byte[] modifiedSignature = new byte[bobSignedPreKeySignature.length];
@@ -338,7 +367,7 @@ public class SessionBuilderTest {
                 bobKyberPreKeySignature);
 
         try {
-          aliceSessionBuilder.process(bobPreKey);
+          aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
           fail("Accepted modified device key signature!");
         } catch (InvalidKeyException ike) {
           // good
@@ -367,7 +396,7 @@ public class SessionBuilderTest {
                 modifiedSignature);
 
         try {
-          aliceSessionBuilder.process(bobPreKey);
+          aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
           fail("Accepted modified Kyber key signature!");
         } catch (InvalidKeyException ike) {
           // good
@@ -388,7 +417,7 @@ public class SessionBuilderTest {
               bobKyberPreKeyPair.getPublicKey(),
               bobKyberPreKeySignature);
 
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
     }
 
     @Test
@@ -408,7 +437,7 @@ public class SessionBuilderTest {
       BundleFactory bundleFactory = new PQXDHBundleFactory();
       PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
 
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
 
       String originalMessage = "Good, fast, cheap: pick two";
       SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
@@ -428,7 +457,7 @@ public class SessionBuilderTest {
       byte[] plaintext = new byte[0];
 
       try {
-        plaintext = bobSessionCipher.decrypt(incomingMessage);
+        plaintext = bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
         fail("Decrypt should have failed!");
       } catch (InvalidMessageException e) {
         // good.
@@ -436,7 +465,7 @@ public class SessionBuilderTest {
 
       assertTrue(bobStore.containsPreKey(bobPreKey.getPreKeyId()));
 
-      plaintext = bobSessionCipher.decrypt(new PreKeySignalMessage(goodMessage));
+      plaintext = bobSessionCipher.decrypt(new PreKeySignalMessage(goodMessage), UsePqRatchet.YES);
 
       assertTrue(originalMessage.equals(new String(plaintext)));
       assertFalse(bobStore.containsPreKey(bobPreKey.getPreKeyId()));
@@ -458,7 +487,7 @@ public class SessionBuilderTest {
       BundleFactory bundleFactory = new PQXDHBundleFactory();
       PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
 
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
 
       String originalMessage = "Good, fast, cheap: pick two";
       SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
@@ -470,7 +499,7 @@ public class SessionBuilderTest {
       SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
 
       try {
-        bobSessionCipher.decrypt(incomingMessage);
+        bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
         fail("Decrypt should have failed!");
       } catch (InvalidKeyIdException e) {
         assertEquals(
@@ -495,7 +524,7 @@ public class SessionBuilderTest {
       BundleFactory bundleFactory = new PQXDHBundleFactory();
       PreKeyBundle bobPreKey = bundleFactory.createBundle(bobStore);
 
-      aliceSessionBuilder.process(bobPreKey);
+      aliceSessionBuilder.process(bobPreKey, UsePqRatchet.YES);
 
       String originalMessage = "Good, fast, cheap: pick two";
       SessionCipher aliceSessionCipher = new SessionCipher(aliceStore, BOB_ADDRESS);
@@ -507,7 +536,7 @@ public class SessionBuilderTest {
       SessionCipher bobSessionCipher = new SessionCipher(bobStore, ALICE_ADDRESS);
 
       try {
-        bobSessionCipher.decrypt(incomingMessage);
+        bobSessionCipher.decrypt(incomingMessage, UsePqRatchet.YES);
         fail("Decrypt should have failed!");
       } catch (InvalidKeyIdException e) {
         fail("libsignal swallowed the exception");

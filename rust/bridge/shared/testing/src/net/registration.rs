@@ -18,14 +18,8 @@ use libsignal_net::auth::Auth;
 use libsignal_net::chat::fake::FakeChatRemote;
 use libsignal_net::chat::ChatConnection;
 use libsignal_net::infra::errors::RetryLater;
-use libsignal_net::registration::{
-    CheckSvr2CredentialsError, CheckSvr2CredentialsResponse, ConnectChat, CreateSessionError,
-    RegisterAccountError, RegisterAccountResponse, RegisterResponseBackup, RegisterResponseBadge,
-    RegisterResponseEntitlements, RegistrationLock, RegistrationSession, RequestError,
-    RequestVerificationCodeError, RequestedInformation, ResumeSessionError,
-    SubmitVerificationError, Svr2CredentialsResult, UpdateSessionError,
-    VerificationCodeNotDeliverable,
-};
+use libsignal_net_chat::api::registration::*;
+use libsignal_net_chat::registration::*;
 use uuid::uuid;
 
 use super::make_error_testing_enum;
@@ -83,9 +77,9 @@ impl ConnectChat for ConnectFakeChat {
     ) -> BoxFuture<'_, Result<ChatConnection, libsignal_net::chat::ConnectError>> {
         let mut on_disconnect = Some(on_disconnect);
         let listener = move |event| match event {
-            libsignal_net::chat::ws2::ListenerEvent::Finished(_) => drop(on_disconnect.take()),
-            libsignal_net::chat::ws2::ListenerEvent::ReceivedAlerts(_)
-            | libsignal_net::chat::ws2::ListenerEvent::ReceivedMessage(_, _) => (),
+            libsignal_net::chat::ws::ListenerEvent::Finished(_) => drop(on_disconnect.take()),
+            libsignal_net::chat::ws::ListenerEvent::ReceivedAlerts(_)
+            | libsignal_net::chat::ws::ListenerEvent::ReceivedMessage(_, _) => (),
         };
 
         let (chat, remote) = ChatConnection::new_fake(self.0.clone(), Box::new(listener), []);
