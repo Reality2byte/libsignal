@@ -2,7 +2,7 @@
 name = "libsignal-net-infra"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.83"
 authors.workspace = true
 license.workspace = true
 
@@ -25,7 +25,7 @@ boring-signal = { workspace = true }
 bytes = { workspace = true }
 const-str = { workspace = true }
 derive-where = { workspace = true }
-derive_more = { workspace = true, features = ["from", "into", "into_iterator"] }
+derive_more = { workspace = true, features = ["display", "from", "into", "into_iterator"] }
 displaydoc = { workspace = true }
 either = { workspace = true }
 futures-util = { workspace = true }

@@ -87,6 +87,7 @@ jobs:
           - '.gitignore'
           - '.gitattributes'
           - '.editorconfig'
+          - '.tool-versions'
           - 'justfile'
           - 'doc/**'
 
@@ -169,7 +170,8 @@ jobs:
       run: cargo +${{ matrix.toolchain }} test --workspace --all-features --verbose --no-fail-fast -- --include-ignored
 
     - name: Test run benches
-      run: cargo +${{ matrix.toolchain }} test --workspace --benches --all-features --verbose --no-fail-fast
+      # Run with a match-all regex to select all the benchmarks, which (confusingly) causes other tests to be skipped.
+      run: cargo +${{ matrix.toolchain }} test --workspace --benches --all-features --verbose --no-fail-fast '.*'
 
     - name: Build bins and examples
       run: cargo +${{ matrix.toolchain }} build --workspace  --bins --examples --all-features --verbose --keep-going
@@ -295,7 +297,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-15]
 
     needs: changes
 
@@ -323,7 +325,7 @@ jobs:
       if: matrix.os == 'windows-latest'
 
     - run: brew install protobuf
-      if: matrix.os == 'macos-latest'
+      if: startsWith(matrix.os, 'macos-')
 
     - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
       with:
@@ -397,7 +399,7 @@ jobs:
   swift_cocoapod:
     name: Swift CocoaPod
 
-    runs-on: macos-latest
+    runs-on: macos-15
 
     needs: changes
 
@@ -413,8 +415,15 @@ jobs:
       - run: brew install protobuf swiftlint
 
       - name: Check formatting
-        run: swiftformat --swiftversion 5 --reporter github-actions-log --lint .
+        run: swift format --in-place --parallel --recursive . && git diff --exit-code .
         working-directory: swift
+        env:
+          # This is only here because we're on a macOS 15 runner, which defaults to Xcode 16.0,
+          # which contains a swift-format that fails on some of our Swift 6.0 code.
+          # Once we're on a later runner, this should be removed.
+          # We should know that immediately if this stays at 16.2,
+          # because the new runners usually only keep one previous Xcode major version.
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app
 
       - name: Run lint
         run: swiftlint lint --strict --reporter github-actions-logging

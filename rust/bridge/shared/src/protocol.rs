@@ -9,6 +9,7 @@ use futures_util::FutureExt;
 use libsignal_bridge_macros::*;
 #[cfg(feature = "jni")]
 use libsignal_bridge_types::jni;
+use libsignal_core::InvalidDeviceId;
 use libsignal_protocol::error::Result;
 use libsignal_protocol::*;
 use rand::TryRngCore as _;
@@ -112,8 +113,14 @@ fn ServiceId_ParseFromServiceIdString(input: String) -> Result<ServiceId> {
 }
 
 #[bridge_fn(ffi = "address_new")]
-fn ProtocolAddress_New(name: String, device_id: u32) -> ProtocolAddress {
-    ProtocolAddress::new(name, device_id.into())
+fn ProtocolAddress_New(name: String, device_id: u32) -> Result<ProtocolAddress> {
+    let device_id = device_id.try_into().map_err(|InvalidDeviceId| {
+        SignalProtocolError::InvalidProtocolAddress {
+            name: name.clone(),
+            device_id,
+        }
+    })?;
+    Ok(ProtocolAddress::new(name, device_id))
 }
 
 #[bridge_fn(ffi = "publickey_deserialize", jni = false)]
@@ -121,11 +128,12 @@ fn PublicKey_Deserialize(data: &[u8]) -> Result<PublicKey> {
     Ok(PublicKey::deserialize(data)?)
 }
 
-// Alternate implementation to deserialize from an offset.
+// Alternate implementation to deserialize from an offset and length.
 #[bridge_fn(ffi = false, node = false)]
-fn ECPublicKey_Deserialize(data: &[u8], offset: u32) -> Result<PublicKey> {
+fn ECPublicKey_Deserialize(data: &[u8], offset: u32, length: u32) -> Result<PublicKey> {
     let offset = offset as usize;
-    Ok(PublicKey::deserialize(&data[offset..])?)
+    let length = length as usize;
+    Ok(PublicKey::deserialize(&data[offset..][..length])?)
 }
 
 bridge_get!(
@@ -213,9 +221,14 @@ fn KyberPublicKey_Deserialize(data: &[u8]) -> Result<KyberPublicKey> {
 }
 
 #[bridge_fn(ffi = false, node = false)]
-fn KyberPublicKey_DeserializeWithOffset(data: &[u8], offset: u32) -> Result<KyberPublicKey> {
+fn KyberPublicKey_DeserializeWithOffsetLength(
+    data: &[u8],
+    offset: u32,
+    length: u32,
+) -> Result<KyberPublicKey> {
     let offset = offset as usize;
-    KyberPublicKey::deserialize(&data[offset..])
+    let length = length as usize;
+    KyberPublicKey::deserialize(&data[offset..][..length])
 }
 
 bridge_get!(
@@ -347,7 +360,14 @@ bridge_get!(SignalMessage::serialized -> &[u8], ffi = "message_get_serialized");
 bridge_get!(SignalMessage::counter -> u32, ffi = "message_get_counter");
 bridge_get!(SignalMessage::message_version -> u32, ffi = "message_get_message_version");
 
+// Normal bridge_get!() doesn't work here, since msg.pq_ratchet() returns a &spqr::SerializedMessage.
+#[bridge_fn(ffi = "message_get_pq_ratchet")]
+fn SignalMessage_GetPqRatchet(msg: &SignalMessage) -> &[u8] {
+    msg.pq_ratchet()
+}
+
 #[bridge_fn(ffi = "message_new")]
+#[allow(clippy::too_many_arguments)]
 fn SignalMessage_New(
     message_version: u8,
     mac_key: &[u8],
@@ -357,6 +377,7 @@ fn SignalMessage_New(
     ciphertext: &[u8],
     sender_identity_key: &PublicKey,
     receiver_identity_key: &PublicKey,
+    pq_ratchet: &[u8],
 ) -> Result<SignalMessage> {
     SignalMessage::new(
         message_version,
@@ -367,6 +388,7 @@ fn SignalMessage_New(
         ciphertext,
         &IdentityKey::new(*sender_identity_key),
         &IdentityKey::new(*receiver_identity_key),
+        pq_ratchet,
     )
 }
 
@@ -597,20 +619,22 @@ fn PreKeyBundle_New(
         }
     };
 
-    Ok(PreKeyBundle::new(
+    let device_id = device_id
+        .try_into()
+        .map_err(|e: InvalidDeviceId| SignalProtocolError::InvalidArgument(e.to_string()))?;
+
+    PreKeyBundle::new(
         registration_id,
-        device_id.into(),
+        device_id,
         prekey,
         signed_prekey_id.into(),
         *signed_prekey,
         signed_prekey_signature.to_vec(),
-        identity_key,
-    )?
-    .with_kyber_pre_key(
         kyber_prekey_id.into(),
         kyber_prekey.clone(),
         kyber_prekey_signature.to_vec(),
-    ))
+        identity_key,
+    )
 }
 
 #[bridge_fn]
@@ -619,34 +643,18 @@ fn PreKeyBundle_GetIdentityKey(p: &PreKeyBundle) -> Result<PublicKey> {
 }
 
 bridge_get!(PreKeyBundle::signed_pre_key_signature -> &[u8]);
+bridge_get!(PreKeyBundle::kyber_pre_key_signature -> &[u8]);
 bridge_get!(PreKeyBundle::registration_id -> u32);
 bridge_get!(PreKeyBundle::device_id -> u32);
 bridge_get!(PreKeyBundle::signed_pre_key_id -> u32);
+bridge_get!(PreKeyBundle::kyber_pre_key_id -> u32);
 bridge_get!(PreKeyBundle::pre_key_id -> Option<u32>);
 bridge_get!(PreKeyBundle::pre_key_public -> Option<PublicKey>);
 bridge_get!(PreKeyBundle::signed_pre_key_public -> PublicKey);
 
 #[bridge_fn]
-fn PreKeyBundle_GetKyberPreKeyId(bundle: &PreKeyBundle) -> Result<u32> {
-    Ok(bundle
-        .kyber_pre_key_id()?
-        .expect("all bridged PreKeyBundles have a Kyber key")
-        .into())
-}
-
-#[bridge_fn]
 fn PreKeyBundle_GetKyberPreKeyPublic(bundle: &PreKeyBundle) -> Result<KyberPublicKey> {
-    Ok(bundle
-        .kyber_pre_key_public()?
-        .expect("all bridged PreKeyBundles have a Kyber key")
-        .clone())
-}
-
-#[bridge_fn]
-fn PreKeyBundle_GetKyberPreKeySignature(bundle: &PreKeyBundle) -> Result<&[u8]> {
-    Ok(bundle
-        .kyber_pre_key_signature()?
-        .expect("all bridged PreKeyBundles have a Kyber key"))
+    Ok(bundle.kyber_pre_key_public()?.clone())
 }
 
 bridge_deserialize!(SignedPreKeyRecord::deserialize);
@@ -768,11 +776,14 @@ fn SenderCertificate_New(
 ) -> Result<SenderCertificate> {
     let mut rng = rand::rngs::OsRng.unwrap_err();
 
+    let sender_device_id = DeviceId::try_from(sender_device_id)
+        .map_err(|e| SignalProtocolError::InvalidArgument(e.to_string()))?;
+
     SenderCertificate::new(
         sender_uuid,
         sender_e164,
         *sender_key,
-        sender_device_id.into(),
+        sender_device_id,
         expiration,
         signer_cert.clone(),
         signer_key,
@@ -1017,6 +1028,7 @@ async fn SessionBuilder_ProcessPreKeyBundle(
     session_store: &mut dyn SessionStore,
     identity_key_store: &mut dyn IdentityKeyStore,
     now: Timestamp,
+    use_pq_ratchet: bool,
 ) -> Result<()> {
     let mut csprng = rand::rngs::OsRng.unwrap_err();
     process_prekey_bundle(
@@ -1026,6 +1038,7 @@ async fn SessionBuilder_ProcessPreKeyBundle(
         bundle,
         now.into(),
         &mut csprng,
+        UsePQRatchet::from(use_pq_ratchet),
     )
     .await
 }
@@ -1038,12 +1051,14 @@ async fn SessionCipher_EncryptMessage(
     identity_key_store: &mut dyn IdentityKeyStore,
     now: Timestamp,
 ) -> Result<CiphertextMessage> {
+    let mut csprng = rand::rngs::OsRng.unwrap_err();
     message_encrypt(
         ptext,
         protocol_address,
         session_store,
         identity_key_store,
         now.into(),
+        &mut csprng,
     )
     .await
 }
@@ -1075,6 +1090,7 @@ async fn SessionCipher_DecryptPreKeySignalMessage(
     prekey_store: &mut dyn PreKeyStore,
     signed_prekey_store: &mut dyn SignedPreKeyStore,
     kyber_prekey_store: &mut dyn KyberPreKeyStore,
+    use_pq_ratchet: bool,
 ) -> Result<Vec<u8>> {
     let mut csprng = rand::rngs::OsRng.unwrap_err();
     message_decrypt_prekey(
@@ -1086,6 +1102,7 @@ async fn SessionCipher_DecryptPreKeySignalMessage(
         signed_prekey_store,
         kyber_prekey_store,
         &mut csprng,
+        UsePQRatchet::from(use_pq_ratchet),
     )
     .await
 }
@@ -1180,19 +1197,25 @@ async fn SealedSender_DecryptMessage(
     prekey_store: &mut dyn PreKeyStore,
     signed_prekey_store: &mut dyn SignedPreKeyStore,
     kyber_prekey_store: &mut dyn KyberPreKeyStore,
+    use_pq_ratchet: bool,
 ) -> Result<SealedSenderDecryptionResult> {
+    let local_device_id = local_device_id
+        .try_into()
+        .map_err(|e: InvalidDeviceId| SignalProtocolError::InvalidArgument(e.to_string()))?;
+
     sealed_sender_decrypt(
         message,
         trust_root,
         timestamp,
         local_e164,
         local_uuid,
-        local_device_id.into(),
+        local_device_id,
         identity_store,
         session_store,
         prekey_store,
         signed_prekey_store,
         kyber_prekey_store,
+        UsePQRatchet::from(use_pq_ratchet),
     )
     .await
 }

@@ -5,18 +5,13 @@
 
 use std::net::IpAddr;
 use std::num::NonZeroU16;
-use std::str::FromStr;
-use std::string::ToString;
 use std::sync::Arc;
 
-use ::http::uri::PathAndQuery;
-use ::http::Uri;
-use async_trait::async_trait;
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::certs::RootCertificates;
-use crate::errors::{LogSafeDisplay, RetryLater, TransportConnectError};
+use crate::errors::{LogSafeDisplay, RetryLater};
 use crate::host::Host;
 use crate::timeouts::{WS_KEEP_ALIVE_INTERVAL, WS_MAX_IDLE_INTERVAL};
 
@@ -27,7 +22,6 @@ pub mod host;
 pub mod http_client;
 pub mod noise;
 pub mod route;
-pub mod service;
 pub mod tcp_ssl;
 pub mod timeouts;
 pub mod utils;
@@ -83,32 +77,6 @@ pub enum EnforceMinimumTls {
     No,
 }
 
-/// A collection of commonly used decorators for HTTP requests.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HttpRequestDecorator {
-    /// Adds a collection of headers to the request
-    Headers(http::header::HeaderMap),
-    /// Prefixes the path portion of the request with the given string.
-    PathPrefix(&'static str),
-    /// Applies generic decoration logic.
-    Generic(fn(http::request::Builder) -> http::request::Builder),
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct HttpRequestDecoratorSeq(Vec<HttpRequestDecorator>);
-
-impl From<HttpRequestDecorator> for HttpRequestDecoratorSeq {
-    fn from(value: HttpRequestDecorator) -> Self {
-        Self(vec![value])
-    }
-}
-
-impl HttpRequestDecoratorSeq {
-    pub fn add(&mut self, decorator: HttpRequestDecorator) {
-        self.0.push(decorator)
-    }
-}
-
 /// The fully general version of [`AsStaticHttpHeader`], where the name of the header may depend on the
 /// value.
 pub trait AsHttpHeader {
@@ -130,13 +98,6 @@ impl<T: AsStaticHttpHeader> AsHttpHeader for T {
     }
 }
 
-impl<T: AsHttpHeader> From<&'_ T> for HttpRequestDecorator {
-    fn from(value: &'_ T) -> Self {
-        let (name, value) = value.as_header();
-        HttpRequestDecorator::header(name, value)
-    }
-}
-
 /// Contains all information required to establish an HTTP connection to a remote endpoint.
 ///
 /// For WebSocket connections, `http_request_decorator` will only be applied to the initial
@@ -147,8 +108,8 @@ pub struct ConnectionParams {
     pub route_type: RouteType,
     /// Host name used in the HTTP headers.
     pub http_host: Arc<str>,
-    /// Applied to all HTTP requests.
-    pub http_request_decorator: HttpRequestDecoratorSeq,
+    /// Prefix prepended to the path of all HTTP requests.
+    pub path_prefix: Option<&'static str>,
     /// If present, differentiates HTTP responses that actually come from the remote endpoint from
     /// those produced by an intermediate server.
     pub connection_confirmation_header: Option<HeaderName>,
@@ -157,12 +118,6 @@ pub struct ConnectionParams {
 }
 
 impl ConnectionParams {
-    pub fn with_decorator(mut self, decorator: HttpRequestDecorator) -> Self {
-        let HttpRequestDecoratorSeq(decorators) = &mut self.http_request_decorator;
-        decorators.push(decorator);
-        self
-    }
-
     pub fn with_confirmation_header(mut self, header: HeaderName) -> Self {
         self.connection_confirmation_header = Some(header);
         self
@@ -270,76 +225,9 @@ impl ServiceConnectionInfo {
     }
 }
 
-impl HttpRequestDecoratorSeq {
-    pub fn decorate_request(
-        &self,
-        request_builder: http::request::Builder,
-    ) -> http::request::Builder {
-        self.0
-            .iter()
-            .fold(request_builder, |rb, dec| dec.decorate_request(rb))
-    }
-}
-
-impl HttpRequestDecorator {
-    /// Convenience constructor for [`HttpRequestDecorator::Headers`] with a map
-    /// with one entry.
-    pub fn header(name: HeaderName, value: HeaderValue) -> Self {
-        Self::Headers(HeaderMap::from_iter([(name, value)]))
-    }
-
-    fn decorate_request(&self, request_builder: http::request::Builder) -> http::request::Builder {
-        match self {
-            Self::Generic(decorator) => decorator(request_builder),
-            Self::Headers(header_map) => header_map
-                .into_iter()
-                .fold(request_builder, |builder, (name, value)| {
-                    builder.header(name, value)
-                }),
-            Self::PathPrefix(prefix) => {
-                let uri = request_builder.uri_ref().expect("request has URI set");
-                let mut parts = (*uri).clone().into_parts();
-                let decorated_pq = match parts.path_and_query {
-                    Some(pq) => format!("{}{}", prefix, pq.as_str()),
-                    None => prefix.to_string(),
-                };
-                parts.path_and_query = Some(
-                    PathAndQuery::from_str(decorated_pq.as_str()).expect("valid path and query"),
-                );
-                request_builder.uri(Uri::from_parts(parts).expect("valid uri"))
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct StreamAndInfo<T>(pub T, pub ServiceConnectionInfo);
-
-impl<T> StreamAndInfo<T> {
-    fn map_stream<U>(self, f: impl FnOnce(T) -> U) -> StreamAndInfo<U> {
-        StreamAndInfo(f(self.0), self.1)
-    }
-}
-
 pub trait AsyncDuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncDuplexStream for S {}
-
-/// Establishes TCP/TLS connections to remote destinations.
-///
-/// Given a destination in the form of [`TransportConnectionParams`],
-/// establishes a TLS handshake with the remote target, possibly through one or
-/// more intermediary proxies.
-#[async_trait]
-pub trait TransportConnector: Clone + Send + Sync {
-    type Stream: AsyncDuplexStream + 'static;
-
-    async fn connect(
-        &self,
-        connection_params: &TransportConnectionParams,
-        alpn: Alpn,
-    ) -> Result<StreamAndInfo<Self::Stream>, TransportConnectError>;
-}
 
 /// A single ALPN list entry.
 ///
@@ -385,27 +273,19 @@ pub fn extract_retry_later(headers: &http::header::HeaderMap) -> Option<RetryLat
 #[cfg(any(test, feature = "test-util"))]
 pub mod testutil {
     use std::fmt::Debug;
-    use std::io;
     use std::io::Error as IoError;
     use std::pin::Pin;
     use std::sync::LazyLock;
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use displaydoc::Display;
     use futures_util::stream::FusedStream;
     use futures_util::{Sink, SinkExt as _, Stream};
-    use tokio::io::DuplexStream;
     use tokio_util::sync::PollSender;
-    use warp::{Filter, Reply};
 
-    use crate::errors::{LogSafeDisplay, TransportConnectError};
+    use crate::errors::LogSafeDisplay;
     use crate::utils::NetworkChangeEvent;
-    use crate::{
-        Alpn, DnsSource, RouteType, ServiceConnectionInfo, StreamAndInfo,
-        TransportConnectionParams, TransportConnector,
-    };
 
     #[derive(Debug, Display)]
     pub enum TestError {
@@ -435,48 +315,8 @@ pub mod testutil {
         SENDER_THAT_NEVER_SENDS.subscribe()
     }
 
-    #[derive(Clone)]
-    pub struct InMemoryWarpConnector<F> {
-        filter: F,
-    }
-
-    impl<F> InMemoryWarpConnector<F> {
-        pub fn new(filter: F) -> Self {
-            Self { filter }
-        }
-    }
-
-    #[async_trait]
-    impl<F> TransportConnector for InMemoryWarpConnector<F>
-    where
-        F: Filter<Extract: Reply> + Clone + Send + Sync + 'static,
-    {
-        type Stream = DuplexStream;
-
-        async fn connect(
-            &self,
-            connection_params: &TransportConnectionParams,
-            _alpn: Alpn,
-        ) -> Result<StreamAndInfo<Self::Stream>, TransportConnectError> {
-            let (client, server) = tokio::io::duplex(1024);
-            let routes = self.filter.clone();
-            tokio::spawn(async {
-                let one_element_iter =
-                    futures_util::stream::iter(vec![Ok::<DuplexStream, io::Error>(server)]);
-                warp::serve(routes).run_incoming(one_element_iter).await;
-            });
-            Ok(StreamAndInfo(
-                client,
-                ServiceConnectionInfo {
-                    route_type: RouteType::Test,
-                    dns_source: DnsSource::Test,
-                    address: connection_params.tcp_host.clone(),
-                },
-            ))
-        }
-    }
-
     /// Trivial [`Sink`] and [`Stream`] implementation over a pair of buffered channels.
+    #[derive(Debug)]
     pub struct TestStream<T, E> {
         rx: tokio::sync::mpsc::Receiver<Result<T, E>>,
         tx: PollSender<Result<T, E>>,
@@ -559,11 +399,9 @@ pub mod testutil {
 #[cfg(test)]
 pub(crate) mod test {
     use const_str::ip_addr;
-    use http::Request;
 
     use crate::host::Host;
-    use crate::utils::basic_authorization;
-    use crate::{DnsSource, HttpRequestDecorator, RouteType, ServiceConnectionInfo};
+    use crate::{DnsSource, RouteType, ServiceConnectionInfo};
 
     #[test]
     fn connection_info_description() {
@@ -586,37 +424,5 @@ pub(crate) mod test {
             .description(),
             "route=test;dns_source=systemlookup;ip_type=V4"
         )
-    }
-
-    #[test]
-    fn test_path_prefix_decorator() {
-        let cases = vec![
-            ("https://chat.signal.org/", "/chat/"),
-            ("https://chat.signal.org/v1", "/chat/v1"),
-            ("https://chat.signal.org/v1?a=b", "/chat/v1"),
-            ("https://chat.signal.org/v1/endpoint", "/chat/v1/endpoint"),
-        ];
-        for (input, expected_path) in cases.into_iter() {
-            let builder = Request::get(input);
-            let builder = HttpRequestDecorator::PathPrefix("/chat").decorate_request(builder);
-            let (parts, _) = builder.body(()).unwrap().into_parts();
-            assert_eq!(expected_path, parts.uri.path(), "for input [{input}]")
-        }
-    }
-
-    #[test]
-    fn test_header_auth_decorator() {
-        let expected = "Basic dXNybm06cHNzd2Q=";
-        let builder = Request::get("https://chat.signal.org/");
-        let builder = HttpRequestDecorator::header(
-            http::header::AUTHORIZATION,
-            basic_authorization("usrnm", "psswd"),
-        )
-        .decorate_request(builder);
-        let (parts, _) = builder.body(()).unwrap().into_parts();
-        assert_eq!(
-            expected,
-            parts.headers.get(http::header::AUTHORIZATION).unwrap()
-        );
     }
 }
